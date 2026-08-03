@@ -12,6 +12,67 @@ separate chat) reads the screenshots and extracts song data — that part is
 NOT done here in Claude Code. Your job starts once the extracted song list
 already exists as plain text (title / artist / duration).
 
+## Adapting this for a new user
+
+This document was written around Rishendra's own setup, so if you've
+found or forked these files for your own use, a few small things are
+worth adjusting first to make everything fit your setup smoothly —
+nothing complicated, just a quick checklist below before your first run.
+
+**1. Playlist name.** Every ready-to-paste prompt in this document
+(Cowork stages 1 and 2) refers to a playlist literally named
+`"Instagram Save"`. That's just the name Rishendra picked — it has no
+special meaning to YouTube or to the code. Before running anything,
+create your own destination playlist on YouTube (see Step 0 note under
+the workflow below — do this manually, empty, before Cowork touches
+anything) and find-and-replace `"Instagram Save"` with your playlist's
+actual name in every prompt you copy from this file.
+
+**2. Starting database state.** The `songs.db` in this repo already
+contains Rishendra's real 22 songs, all marked `added`. If you want a
+clean slate rather than inheriting his library:
+```
+DELETE FROM songs;
+```
+run once in Claude Code against your own copy of the file (or just
+delete `songs.db` — `create_db.py`/`export_excel.py` will build a fresh
+one with the same schema the next time they're run).
+
+**3. Cloud sync tool.** Step 0 and the "CRITICAL" section further down
+are written specifically for **Windows + OneDrive**, because that's
+Rishendra's setup and where the pause-before-writing lesson was learned
+the hard way. If you're on a Mac, using Google Drive/Dropbox, or no
+cloud sync at all:
+- The underlying risk is generic: any tool that syncs files in the
+  background can lock or briefly serve a stale copy of a file while a
+  script is actively writing to it. If you hit disk I/O errors or a
+  "verified" write that doesn't match what you see when you check the
+  file yourself, suspect your sync tool the same way this document
+  suspects OneDrive.
+- Pause whatever the equivalent is for your service (Google Drive has
+  its own pause option in its system tray/menu bar icon; Dropbox
+  similarly), or move the project folder outside any synced directory
+  entirely while running Cowork/Claude Code sessions.
+- If you have no cloud sync at all, you can likely ignore Step 0 and
+  the CRITICAL section entirely.
+
+**4. Your own name.** "Rishendra" appears throughout this document as
+the person doing the work — it's not a variable the code reads, just
+how this specific build is documented. Mentally (or literally) swap in
+your own name as you read; nothing depends on the literal string.
+
+**5. First-time setup checklist**, before your first real run:
+- Python installed, plus `pip install openpyxl` (for the colour-coded
+  Excel output — see "Files in this folder" below for the CSV fallback
+  if you skip this).
+- An empty destination playlist created by you, by hand, on YouTube
+  (matches point 1 above).
+- Cowork/Claude-in-Chrome logged into **your own** YouTube account, not
+  anyone else's.
+- This project's folder placed wherever you want it — nothing in the
+  code assumes a specific path, only that `songs.db`, `export_excel.py`,
+  and this file all sit together in the same folder.
+
 ## End-to-end workflow — the full run, in order
 
 This is the whole pipeline, start to finish, across three different
@@ -66,7 +127,7 @@ flowchart TD
     J --> K
 
     subgraph chat2[Claude.ai chat, separate]
-        K["Step 7: Upload songs.db<br/>VERIFY DIRECTLY<br/>(don't trust a tool's<br/>own summary)"]
+        K["Step 7: Upload songs.db<br/>for final confirmation<br/>check in separate chat"]
     end
 
     K --> L["✅ All rows added/skipped<br/>Batch done<br/>Resume OneDrive sync"]
@@ -162,12 +223,10 @@ Cowork just opens each stored `youtube_url` directly and adds it to
 
 **Step 7 — Final verification.**
 Rishendra uploads the current `songs.db` (and optionally `song_review.xlsx`)
-to the separate Claude.ai chat, where it gets checked directly — not by
-trusting Cowork's or Claude Code's own summary of what it did. This is the
-step that actually catches problems (see the OneDrive section below for
-why self-reported "verified" isn't always trustworthy). Once every row
-reads `added` (or a deliberate `skipped`), the batch is done. Rishendra
-resumes OneDrive sync at this point.
+to the separate Claude.ai chat for a final confirmation pass — a quick,
+independent check that every row reads `added` (or a deliberate
+`skipped`) before considering the batch complete. Once confirmed, the
+batch is done and Rishendra resumes OneDrive sync.
 
 The end result — the actual "Instagram Save" YouTube playlist:
 
@@ -267,6 +326,25 @@ from a chat session that read a screenshot:
 Do not set match_status on insert — it defaults to `pending`, which is
 correct; Cowork's stage-1 prompt only processes `pending` rows.
 
+### Insert-a-batch prompt (Step 2) — paste as-is into Claude Code, filling in the list
+
+```
+Insert this batch of newly extracted songs into songs.db as new rows,
+per PROJECT_STATE.md (default pending status, INSERT OR IGNORE for the
+dedup guard):
+
+<PASTE TITLE — ARTIST — DURATION LIST HERE, ONE PER LINE>
+
+Note any songs with an unreadable/unknown duration: leave duration and
+duration_seconds NULL for those rather than guessing.
+
+Confirm how many were newly added vs. ignored as duplicates, then close
+the database connection, re-open songs.db from this exact folder, and
+print the full table (id, title, match_status) as an independent second
+read — don't just report what the insert statement claims. Then run
+export_excel.py per the standing rule.
+```
+
 ## Excel sheet rules — IMPORTANT, read before touching export_excel.py
 
 The column structure was explicitly approved by Rishendra and must NOT be
@@ -303,6 +381,23 @@ possibly a corrected YouTube link pasted over the flagged one):
 4. Blank → leave as `needs_review`, still pending a decision.
 5. Run export_excel.py afterward so the snapshot reflects the new state.
 
+### Sync-a-decision prompt (Step 5) — paste as-is into Claude Code, filling in the details
+
+```
+Song #<ID> ("<TITLE>" by <ARTIST>) is currently needs_review. <Describe
+the decision: e.g. "Keep it, using the official video candidate from
+notes" or "Skip it, no good version exists".>
+
+If Keep: set match_status to to_add, and set youtube_url /
+youtube_video_id to the confirmed link. Clear date_added_to_playlist
+(it's not on the playlist yet — Cowork stage 2 does that next).
+If Skip: set match_status to skipped, leave the link untouched.
+
+Then close the database connection, re-open songs.db from this exact
+folder, and print that row back to confirm the write landed. Then run
+export_excel.py per the standing rule.
+```
+
 ## The Cowork handoff (two stages, run separately, in the browser — not here)
 
 - **Stage 1** — processes `pending` rows: searches YouTube, prefers an
@@ -322,7 +417,7 @@ processed and the database write is confirmed.** Don't leave it open
 after a successful run — this should be the last action Cowork takes,
 after the database and spreadsheet are already updated and verified.
 
-### Stage 1 prompt — paste as-is into Cowork
+### Stage 1 prompt (Step 3) — paste as-is into Cowork
 
 ```
 Read the songs.db file in this folder — it's a SQLite database with a
@@ -357,7 +452,7 @@ table called songs. For every song where match_status is pending:
    needs_review with their links.
 ```
 
-### Stage 2 prompt — paste as-is into Cowork (only after Rishendra has
+### Stage 2 prompt (Step 6) — paste as-is into Cowork (only after Rishendra has
 ### reviewed any needs_review rows and Claude Code has set them to to_add)
 
 ```
